@@ -33,6 +33,13 @@ services:
       # uvicorn access lines.
       PYQUOTEX_LOG_LEVEL: "${PYQUOTEX_LOG_LEVEL:-WARNING}"
       PYQUOTEX_ACCESS_LOG: "${PYQUOTEX_ACCESS_LOG:-0}"
+      # Telegram (optional — only when using the /ui dashboard).
+      PYQUOTEX_TELEGRAM_API_ID: "${PYQUOTEX_TELEGRAM_API_ID:-}"
+      PYQUOTEX_TELEGRAM_API_HASH: "${PYQUOTEX_TELEGRAM_API_HASH:-}"
+    volumes:
+      # Persist the broker session.json + Telegram .session file +
+      # signals.json so users don't have to re-login across restarts.
+      - ./settings:/home/pyquotex/settings
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status==200 else 1)"]
       interval: 30s

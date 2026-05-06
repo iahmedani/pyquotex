@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>pyquotex · Telegram Signals</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">⚡</span>
+      <span class="brand-text">pyquotex <small>signals</small></span>
+    </div>
+    <div class="topbar-right">
+      <span id="quotex-pill" class="pill pill-muted" title="Quotex broker connection">Quotex: —</span>
+      <span id="telegram-pill" class="pill pill-muted" title="Telegram session">Telegram: —</span>
+      <span id="balance-pill" class="pill pill-muted" title="Account balance">Balance: —</span>
+      <button id="pause-btn" class="btn btn-ghost" title="Toggle pause">Pause</button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button data-tab="tab-connect" class="tab tab-active">1. Connect</button>
+    <button data-tab="tab-channels" class="tab">2. Channels</button>
+    <button data-tab="tab-settings" class="tab">3. Parser &amp; Trades</button>
+    <button data-tab="tab-history" class="tab">4. History</button>
+  </nav>
+
+  <main>
+    <!-- API key gate (modal-ish) -->
+    <section id="apikey-gate" class="gate">
+      <div class="card">
+        <h2>API key</h2>
+        <p class="muted">
+          The pyquotex web-API expects an ``X-API-Key`` header. Paste the
+          value of <code>PYQUOTEX_API_KEY</code> here — it's stored only
+          in your browser (localStorage).
+        </p>
+        <div class="row">
+          <input id="apikey-input" type="password" placeholder="bearer / API key" autocomplete="off" />
+          <button id="apikey-save" class="btn btn-primary">Save</button>
+        </div>
+        <p id="apikey-error" class="error"></p>
+      </div>
+    </section>
+
+    <!-- Tab: Connect -->
+    <section id="tab-connect" class="tab-pane tab-active">
+      <div class="grid">
+        <div class="card">
+          <h2>Quotex broker</h2>
+          <p class="muted">
+            Credentials come from <code>PYQUOTEX_EMAIL</code> /
+            <code>PYQUOTEX_PASSWORD</code> on the server. Click Connect
+            to warm the WebSocket; the broker may email a PIN the first
+            time from a new IP.
+          </p>
+          <dl class="kv">
+            <dt>Status</dt><dd id="quotex-status">—</dd>
+            <dt>Auth</dt><dd id="quotex-auth">—</dd>
+            <dt>Balance</dt><dd id="quotex-balance">—</dd>
+            <dt>Profile</dt><dd id="quotex-profile">—</dd>
+          </dl>
+          <div class="row">
+            <button id="btn-quotex-connect" class="btn btn-primary">Connect</button>
+            <button id="btn-quotex-refresh" class="btn">Refresh</button>
+          </div>
+          <div id="quotex-otp" class="hidden">
+            <p class="muted" id="quotex-otp-prompt">Broker requested an OTP.</p>
+            <div class="row">
+              <input id="quotex-otp-code" type="text" inputmode="numeric" placeholder="PIN code" />
+              <button id="btn-quotex-otp" class="btn btn-primary">Submit PIN</button>
+            </div>
+          </div>
+          <p id="quotex-error" class="error"></p>
+        </div>
+
+        <div class="card">
+          <h2>Telegram</h2>
+          <p class="muted">
+            Get an <em>API ID</em> + <em>API Hash</em> from
+            <a href="https://my.telegram.org" target="_blank" rel="noopener">my.telegram.org</a>.
+            They live on this machine — never shared.
+          </p>
+          <details id="tg-creds-panel" open>
+            <summary>API credentials</summary>
+            <div class="row">
+              <input id="tg-api-id" type="number" placeholder="api_id" />
+              <input id="tg-api-hash" type="text" placeholder="api_hash" />
+              <button id="btn-tg-creds" class="btn">Save</button>
+            </div>
+          </details>
+
+          <dl class="kv">
+            <dt>Status</dt><dd id="tg-status">—</dd>
+            <dt>Account</dt><dd id="tg-me">—</dd>
+          </dl>
+
+          <div id="tg-step-phone">
+            <div class="row">
+              <input id="tg-phone" type="tel" placeholder="+14155551234" />
+              <button id="btn-tg-login" class="btn btn-primary">Send code</button>
+            </div>
+          </div>
+
+          <div id="tg-step-code" class="hidden">
+            <p class="muted">Telegram sent a code. Type it below.</p>
+            <div class="row">
+              <input id="tg-code" type="text" inputmode="numeric" placeholder="Login code" />
+              <button id="btn-tg-code" class="btn btn-primary">Submit code</button>
+            </div>
+          </div>
+
+          <div id="tg-step-password" class="hidden">
+            <p class="muted">Two-factor password (cloud password).</p>
+            <div class="row">
+              <input id="tg-password" type="password" placeholder="2FA password" />
+              <button id="btn-tg-password" class="btn btn-primary">Submit password</button>
+            </div>
+          </div>
+
+          <div id="tg-step-authed" class="hidden">
+            <button id="btn-tg-logout" class="btn btn-danger">Log out / forget session</button>
+          </div>
+          <p id="tg-error" class="error"></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tab: Channels -->
+    <section id="tab-channels" class="tab-pane">
+      <div class="card">
+        <div class="card-header">
+          <h2>Telegram dialogs</h2>
+          <button id="btn-dialogs-refresh" class="btn">Refresh</button>
+        </div>
+        <p class="muted">
+          Tick the channels / groups / chats whose signals should drive
+          trades. Save when done.
+        </p>
+        <div class="filter">
+          <input id="dialog-filter" type="search" placeholder="Filter…" />
+          <span class="muted" id="dialog-count">0 dialogs</span>
+        </div>
+        <div id="dialog-list" class="dialog-list">
+          <p class="muted">Connect Telegram first, then refresh.</p>
+        </div>
+        <div class="row right">
+          <button id="btn-channels-save" class="btn btn-primary">Save selection</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tab: Settings -->
+    <section id="tab-settings" class="tab-pane">
+      <div class="grid">
+        <div class="card">
+          <h2>Trade sizing</h2>
+          <label>Base amount<input id="cfg-amount" type="number" min="0.01" step="0.5" /></label>
+          <label>Default expiry (seconds)<input id="cfg-expiry" type="number" min="15" step="5" /></label>
+          <label>Default TZ offset (hours from UTC)<input id="cfg-tz" type="number" min="-12" max="14" step="0.5" /></label>
+        </div>
+        <div class="card">
+          <h2>Martingale (MTG)</h2>
+          <label>Levels (0 disables)<input id="cfg-mtg-levels" type="number" min="0" max="5" step="1" /></label>
+          <label>Multiplier per level<input id="cfg-mtg-mult" type="number" min="1.1" max="5" step="0.1" /></label>
+        </div>
+        <div class="card">
+          <h2>Parsers</h2>
+          <p class="muted">Disable any format you don't want acted on.</p>
+          <label class="check"><input id="cfg-p-live" type="checkbox" /> Live · single message</label>
+          <label class="check"><input id="cfg-p-future" type="checkbox" /> Future · bulk schedule</label>
+          <label class="check"><input id="cfg-p-prep" type="checkbox" /> Live · prep + sticker (multi-message)</label>
+          <hr />
+          <label>Max signal age (s)<input id="cfg-max-age" type="number" min="10" step="10" /></label>
+          <label>Immediate threshold (s)<input id="cfg-imm" type="number" min="0" step="1" /></label>
+        </div>
+        <div class="card">
+          <h2>Test parser</h2>
+          <p class="muted">Paste a sample message to see which parser would catch it.</p>
+          <textarea id="test-input" rows="6" placeholder="Paste signal text here…"></textarea>
+          <div class="row">
+            <button id="btn-test-parse" class="btn">Parse</button>
+            <span id="test-matched" class="pill pill-muted">no match</span>
+          </div>
+          <pre id="test-output" class="output"></pre>
+        </div>
+      </div>
+      <div class="row right">
+        <button id="btn-cfg-save" class="btn btn-primary">Save settings</button>
+      </div>
+      <p id="cfg-error" class="error"></p>
+    </section>
+
+    <!-- Tab: History -->
+    <section id="tab-history" class="tab-pane">
+      <div class="card">
+        <div class="card-header">
+          <h2>Live feed</h2>
+          <span class="muted">auto-refresh · every 2 s</span>
+        </div>
+        <div class="grid">
+          <div>
+            <h3>Signals received</h3>
+            <table class="tbl" id="tbl-signals">
+              <thead><tr>
+                <th>Time</th><th>Kind</th><th>Asset</th><th>Dir</th>
+                <th>Expiry</th><th>Source</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div>
+            <h3>Trades</h3>
+            <table class="tbl" id="tbl-trades">
+              <thead><tr>
+                <th>Placed</th><th>Asset</th><th>Dir</th><th>Amount</th>
+                <th>MTG</th><th>State</th><th>P/L</th>
+              </tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span class="muted">pyquotex · Telegram signals dashboard</span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

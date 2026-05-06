@@ -179,6 +179,127 @@ class CancelResponse(BaseModel):
     detail: dict[str, Any] | str | None = None
 
 
+# ----- Telegram -----
+
+class TelegramCredentialsRequest(BaseModel):
+    api_id: int = Field(..., gt=0)
+    api_hash: str = Field(..., min_length=8)
+
+
+class TelegramLoginRequest(BaseModel):
+    phone: str = Field(
+        ..., min_length=4,
+        description="Phone number in international format, e.g. +14155551234.",
+    )
+
+
+class TelegramCodeRequest(BaseModel):
+    code: str = Field(..., min_length=1, description="Login code Telegram sent.")
+
+
+class TelegramPasswordRequest(BaseModel):
+    password: str = Field(..., min_length=1, description="Cloud (2FA) password.")
+
+
+class TelegramMe(BaseModel):
+    id: int | None = None
+    username: str | None = None
+    first_name: str | None = None
+    phone: str | None = None
+
+
+class TelegramStatus(BaseModel):
+    credentials_set: bool
+    connected: bool
+    authorised: bool
+    awaiting_code: bool
+    awaiting_password: bool
+    phone: str | None = None
+    error: str | None = None
+    me: TelegramMe | None = None
+
+
+class TelegramDialog(BaseModel):
+    id: int
+    title: str
+    is_channel: bool = False
+    is_group: bool = False
+    is_user: bool = False
+    username: str | None = None
+    unread_count: int = 0
+
+
+class TelegramDialogsResponse(BaseModel):
+    dialogs: list[TelegramDialog]
+
+
+# ----- Signals -----
+
+class SignalConfigPatch(BaseModel):
+    """Partial config update — every field is optional."""
+
+    amount: float | None = Field(default=None, gt=0)
+    mtg_levels: int | None = Field(default=None, ge=0, le=5)
+    mtg_multiplier: float | None = Field(default=None, gt=1.0, le=5.0)
+    default_expiry_seconds: int | None = Field(default=None, ge=15, le=3600)
+    default_tz_offset: float | None = Field(default=None, ge=-12, le=14)
+    parsers_enabled: dict[str, bool] | None = None
+    monitored_chat_ids: list[int] | None = None
+    max_signal_age_seconds: int | None = Field(default=None, ge=10, le=86_400)
+    immediate_threshold_seconds: int | None = Field(default=None, ge=0, le=120)
+    paused: bool | None = None
+
+
+class SignalConfigResponse(BaseModel):
+    amount: float
+    mtg_levels: int
+    mtg_multiplier: float
+    default_expiry_seconds: int
+    default_tz_offset: float
+    parsers_enabled: dict[str, bool]
+    monitored_chat_ids: list[int]
+    max_signal_age_seconds: int
+    immediate_threshold_seconds: int
+    paused: bool
+
+
+class SignalEntry(BaseModel):
+    id: str
+    kind: Literal["live", "future"]
+    asset_symbol: str
+    asset_display: str
+    direction: Literal["call", "put"]
+    expiry_seconds: int
+    entry_utc: str
+    received_at: str
+    source_chat_id: int | None = None
+    source_chat_title: str | None = None
+    source_msg_id: int | None = None
+    raw_text: str = ""
+
+
+class TradeEntry(BaseModel):
+    id: str
+    signal_id: str
+    asset_symbol: str
+    asset_display: str
+    direction: Literal["call", "put"]
+    amount: float
+    expiry_seconds: int
+    mtg_step: int
+    state: Literal["pending", "placed", "win", "loss", "error", "skipped"]
+    order_id: str | None = None
+    profit: float = 0.0
+    error: str | None = None
+    placed_at_ms: int
+    settled_at_ms: int | None = None
+
+
+class HistoryResponse(BaseModel):
+    signals: list[SignalEntry]
+    trades: list[TradeEntry]
+
+
 # ----- Errors -----
 
 class ErrorResponse(BaseModel):

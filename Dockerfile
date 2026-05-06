@@ -14,7 +14,7 @@ COPY pyproject.toml README.md ./
 COPY pyquotex ./pyquotex
 
 RUN pip install --no-cache-dir --upgrade pip build \
- && pip wheel --no-cache-dir --wheel-dir /wheels '.[fast,webapi]'
+ && pip wheel --no-cache-dir --wheel-dir /wheels '.[fast,webapi,telegram]'
 
 
 FROM python:3.12-slim AS runtime

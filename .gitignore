@@ -18,6 +18,9 @@ build/
 .session.pkl
 session.json
 settings/config.ini
+settings/*.json
+settings/*.session
+settings/*.session-journal
 
 # Logs
 *.log
