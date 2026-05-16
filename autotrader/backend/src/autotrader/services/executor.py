@@ -608,9 +608,10 @@ class TradeExecutor:
         #
         # Health gate runs AFTER _resolve_asset: assert_live looks the
         # asset up in pyquotex's realtime_price dict, which is keyed by
-        # the resolved broker symbol. Moving this above resolution would
-        # make a fresh-boot/empty-cache path look up the wrong key and
-        # spuriously raise no_tick_seen. Keep it here.
+        # the resolved broker symbol. (assert_live only BLOCKS on
+        # not_connected / ws_not_authed / stale_feed; a not-yet-streamed
+        # asset is observed and allowed — pyquotex subscribes the feed
+        # inside the buy()/open_pending() that follows this gate.)
         from autotrader.services.quotex_manager import BrokerNotLive  # noqa: PLC0415
         try:
             await self._manager.assert_live(signal.asset)

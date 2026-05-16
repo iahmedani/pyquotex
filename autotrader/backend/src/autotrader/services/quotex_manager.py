@@ -110,7 +110,8 @@ class BrokerNotLive(RuntimeError):  # noqa: N818 — intentional name (spec §3.
     ----------
     reason : str
         One of ``"not_connected"``, ``"ws_not_authed"``,
-        ``"no_tick_seen"``, ``"stale_feed"``.
+        ``"stale_feed"``. (A not-yet-streamed asset is observed and
+        allowed, never raised — see :meth:`QuotexManager.assert_live`.)
     detail : dict
         Extra context (e.g. ``age_seconds``, ``threshold``, ``asset``,
         ``state``).  Always a ``dict`` — never ``None``.
@@ -1441,12 +1442,17 @@ class QuotexManager:
           ``AuthStatus.AUTHENTICATED``. Uses the real state-object
           path (NOT the ``is_authenticated`` method — that is a bound
           method object, always truthy).
-        * ``reason="no_tick_seen"`` — no realtime-price tick has
-          arrived for ``asset`` yet.
-        * ``reason="stale_feed"`` — the latest tick is older than
-          ``settings.broker_stale_feed_max_age_seconds``.
+        * ``reason="stale_feed"`` — a tick history EXISTS for ``asset``
+          but the latest tick is older than
+          ``settings.broker_stale_feed_max_age_seconds`` (a warm feed
+          that froze).
 
-        Returns ``None`` (no raise) when all checks pass.
+        When no tick has arrived for ``asset`` yet, this is the normal
+        pre-trade state (pyquotex subscribes the realtime stream inside
+        ``buy()``/``open_pending()``, AFTER this gate) — it logs
+        ``broker.assert_live.no_tick_yet`` and ALLOWS the trade rather
+        than blocking. Returns ``None`` (no raise) when all checks pass
+        or when no tick has been seen yet.
         """
         # ── Check 1: manager state machine ───────────────────────────
         if self._state != "connected":
@@ -1472,11 +1478,25 @@ class QuotexManager:
         if not _authed:
             raise BrokerNotLive("ws_not_authed")
 
-        # ── Check 3 + 4: tick freshness ───────────────────────────────
+        # ── Check 3: tick freshness (observe-only when no tick yet) ───
         age = self._last_tick_age_seconds(asset)
         if age is None:
-            raise BrokerNotLive("no_tick_seen", asset=asset)
+            # No realtime tick for this asset yet. This is the NORMAL
+            # pre-trade state, NOT a dead WS: pyquotex starts an asset's
+            # realtime stream INSIDE buy()/open_pending()
+            # (start_realtime_price, stable_api.py), which runs AFTER
+            # this gate. A freshly-targeted/scheduled asset (e.g. a
+            # just-signalled OTC pair) therefore always has an empty
+            # deque here. connected+authed already proved liveness;
+            # pyquotex's own "Timeout waiting for realtime price data"
+            # handles a genuinely dead feed once it has subscribed.
+            # Blocking here killed legitimate scheduled trades with
+            # healthgate:no_tick_seen (observed 2026-05-16) — observe,
+            # do not block.
+            log.info("broker.assert_live.no_tick_yet", asset=asset)
+            return
 
+        # ── Check 4: stale feed (only meaningful with a tick history) ─
         threshold = float(settings.broker_stale_feed_max_age_seconds)
         if age > threshold:
             raise BrokerNotLive(
