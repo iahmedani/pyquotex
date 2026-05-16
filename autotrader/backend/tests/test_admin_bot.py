@@ -1619,3 +1619,349 @@ def test_format_trade_placed_tolerates_none_direction() -> None:
     msg = format_trade_placed(payload)
     assert "EURUSD" in msg
     assert "?" in msg
+
+
+# --------------------------------------------------------------------------
+# Goal 2026-05-16: balance-on-every-trade + enriched notifications
+# --------------------------------------------------------------------------
+
+
+def test_format_trade_placed_includes_meta_order_and_balance() -> None:
+    """A placed trade with a known parser / mode / order id and a
+    fetched balance must surface all four — that's the 'useful info
+    on every trade' the operator asked for."""
+    from autotrader.services.admin_bot_notify import format_trade_placed  # noqa: PLC0415
+
+    payload = {
+        "id": 9,
+        "asset": "EURUSD_otc",
+        "direction": "call",
+        "duration_seconds": 96,
+        "stake": 5.0,
+        "trade_mode": "scheduled",
+        "parser_name": "DreamVIP",
+        "broker_order_id": "9bb2caf0",
+    }
+    msg = format_trade_placed(payload, balance=1234.5)
+    assert "EURUSD_otc" in msg
+    assert "DreamVIP" in msg
+    assert "scheduled" in msg
+    assert "9bb2caf0" in msg
+    assert "balance $1,234.50" in msg
+
+
+def test_format_trade_placed_omits_balance_and_order_when_absent() -> None:
+    """No balance fetched + no parser/order in the payload → the
+    message stays the compact one-liner (no empty 'order'/'balance'
+    noise)."""
+    from autotrader.services.admin_bot_notify import format_trade_placed  # noqa: PLC0415
+
+    payload = {
+        "asset": "EURUSD",
+        "direction": "put",
+        "duration_seconds": 60,
+        "stake": 2.0,
+    }
+    msg = format_trade_placed(payload)
+    assert "balance" not in msg.lower()
+    assert "order" not in msg.lower()
+
+
+def test_format_trade_settled_includes_parser_and_balance() -> None:
+    from autotrader.services.admin_bot_notify import format_trade_settled  # noqa: PLC0415
+
+    payload = {
+        "asset": "EURUSD",
+        "direction": "call",
+        "duration_seconds": 60,
+        "stake": 5.0,
+        "trade_mode": "live",
+        "status": "won",
+        "profit": 4.25,
+        "parser_name": "DreamVIP",
+    }
+    msg = format_trade_settled(payload, balance=980.0)
+    assert "WON" in msg
+    assert "+$4.25" in msg
+    assert "DreamVIP" in msg
+    assert "balance $980.00" in msg
+
+
+def test_format_trade_settled_omits_balance_when_unavailable() -> None:
+    from autotrader.services.admin_bot_notify import format_trade_settled  # noqa: PLC0415
+
+    payload = {
+        "asset": "EURUSD",
+        "direction": "call",
+        "duration_seconds": 60,
+        "stake": 5.0,
+        "status": "lost",
+        "profit": -5.0,
+    }
+    msg = format_trade_settled(payload)
+    assert "LOST" in msg
+    assert "balance" not in msg.lower()
+
+
+def test_safe_balance_returns_value_swallows_errors_and_times_out() -> None:
+    """``_safe_balance`` is visibility-only garnish: a value passes
+    through, a raising provider and a slow provider both collapse to
+    ``None``, and no provider at all is ``None``. It must never raise
+    or block the trade message it rides on."""
+    from autotrader.services.admin_bot_notify import AdminBotNotifier  # noqa: PLC0415
+
+    bot, _ = _make_bound_bot()
+
+    async def _ok() -> float | None:
+        return 42.0
+
+    async def _boom() -> float | None:
+        raise RuntimeError("broker down")
+
+    async def _slow() -> float | None:
+        await asyncio.sleep(0.05)
+        return 1.0
+
+    async def _run() -> tuple[Any, Any, Any, Any]:
+        n_none = AdminBotNotifier(bot=bot)
+        n_ok = AdminBotNotifier(bot=bot, balance_provider=_ok)
+        n_boom = AdminBotNotifier(bot=bot, balance_provider=_boom)
+        n_slow = AdminBotNotifier(bot=bot, balance_provider=_slow)
+        n_slow._BALANCE_TIMEOUT = 0.01  # type: ignore[attr-defined]
+        return (
+            await n_none._safe_balance(),
+            await n_ok._safe_balance(),
+            await n_boom._safe_balance(),
+            await n_slow._safe_balance(),
+        )
+
+    none_v, ok_v, boom_v, slow_v = asyncio.new_event_loop().run_until_complete(_run())
+    assert none_v is None
+    assert ok_v == 42.0
+    assert boom_v is None
+    assert slow_v is None
+
+
+def test_consume_attaches_balance_to_trade_messages() -> None:
+    """End-to-end: a ``trade.upserted`` pending event drives
+    ``_consume``, which fetches the balance via the provider and
+    embeds it in the DM."""
+    from autotrader.db import AsyncSessionLocal, init_db  # noqa: PLC0415
+    from autotrader.models.settings import GlobalSettings  # noqa: PLC0415
+    from autotrader.services.admin_bot_notify import AdminBotNotifier  # noqa: PLC0415
+    from autotrader.services.event_bus import TradeEventBus  # noqa: PLC0415
+
+    bot, fake = _make_bound_bot()
+
+    async def _bal() -> float | None:
+        return 555.25
+
+    notifier = AdminBotNotifier(bot=bot, balance_provider=_bal)
+    bus = TradeEventBus()
+
+    async def _run() -> list[str]:
+        # Schema may not exist when this test runs in isolation — other
+        # tests reach init_db() via a bot-startup path; this one doesn't.
+        await init_db()
+        async with AsyncSessionLocal() as s:
+            gs = await s.get(GlobalSettings, 1) or GlobalSettings(id=1)
+            gs.admin_telegram_user_id = 555
+            gs.admin_notify_placed = True
+            s.add(gs)
+            await s.commit()
+        await bot.start()
+        task = asyncio.create_task(notifier.run(bus))
+        await asyncio.sleep(0)  # let _consume register its subscriber
+        bus.publish("trade.upserted", {
+            "id": 1,
+            "asset": "EURUSD_otc",
+            "direction": "call",
+            "duration_seconds": 60,
+            "stake": 5.0,
+            "trade_mode": "live",
+            "status": "pending",
+            # PLACED is gated on ``placed_at is not None`` (dedupe of
+            # the executor's double publish), so the broker-confirm
+            # form must carry it for the notification to fire.
+            "placed_at": "2026-05-16T10:00:00Z",
+        })
+        for _ in range(100):
+            if fake.sent_messages:
+                break
+            await asyncio.sleep(0.01)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return [t for _, t, _ in fake.sent_messages]
+
+    try:
+        sent = asyncio.new_event_loop().run_until_complete(_run())
+    finally:
+        _reset_notifier_settings()
+    assert sent, "notifier sent no message"
+    assert "balance $555.25" in sent[0]
+
+
+def test_today_reports_pnl_winrate_and_caps() -> None:
+    """``/today`` renders the daily P&L / committed / open / win-rate
+    / caps block. Aggregates are DB-global (compute_budget is shared
+    with the risk gate) so we assert the structure, not exact totals
+    that other tests' rows could perturb."""
+    from autotrader.db import AsyncSessionLocal  # noqa: PLC0415
+    from autotrader.models.trade_attempt import TradeAttempt  # noqa: PLC0415
+    from sqlmodel import delete  # noqa: PLC0415
+
+    bot, fake = _make_bound_bot()
+
+    async def _seed_then_fetch() -> str:
+        async with AsyncSessionLocal() as s:
+            for asset, status_, profit in [
+                ("EURUSD_otc", "won", 4.0),
+                ("GBPUSD_otc", "lost", -5.0),
+                ("USDJPY_otc", "pending", None),
+            ]:
+                s.add(TradeAttempt(
+                    chat_id=-9002, parser_config_id=9002,
+                    asset=asset, asset_raw=asset, direction="call",
+                    duration_seconds=60, stake=5.0, trade_mode="live",
+                    status=status_, profit=profit,
+                ))
+            await s.commit()
+        await bot.start()
+        await fake.fire_message(555, "/today")
+        return fake.sent_messages[-1][1]
+
+    async def _cleanup() -> None:
+        async with AsyncSessionLocal() as s:
+            await s.exec(delete(TradeAttempt).where(  # type: ignore[call-overload]
+                TradeAttempt.chat_id == -9002,
+            ))
+            await s.commit()
+
+    try:
+        text = asyncio.new_event_loop().run_until_complete(_seed_then_fetch())
+        assert "Today" in text
+        assert "P&L:" in text
+        assert "Committed:" in text
+        assert "Open:" in text
+        assert "Win/Loss:" in text
+        assert "win " in text  # win-rate token rendered
+        assert "Caps:" in text
+    finally:
+        asyncio.new_event_loop().run_until_complete(_cleanup())
+
+
+def test_open_lists_pending_with_order_id() -> None:
+    """``/open`` lists currently-pending trades with their broker
+    order id for cross-referencing."""
+    from autotrader.db import AsyncSessionLocal  # noqa: PLC0415
+    from autotrader.models.trade_attempt import TradeAttempt  # noqa: PLC0415
+    from sqlmodel import delete  # noqa: PLC0415
+
+    bot, fake = _make_bound_bot()
+
+    async def _seed_then_fetch() -> str:
+        async with AsyncSessionLocal() as s:
+            s.add(TradeAttempt(
+                chat_id=-9003, parser_config_id=9003,
+                asset="AUDCAD_otc", asset_raw="AUDCAD", direction="put",
+                duration_seconds=60, stake=3.0, trade_mode="live",
+                status="pending", broker_order_id="OID-OPEN-XYZ",
+            ))
+            await s.commit()
+        await bot.start()
+        await fake.fire_message(555, "/open")
+        return fake.sent_messages[-1][1]
+
+    async def _cleanup() -> None:
+        async with AsyncSessionLocal() as s:
+            await s.exec(delete(TradeAttempt).where(  # type: ignore[call-overload]
+                TradeAttempt.chat_id == -9003,
+            ))
+            await s.commit()
+
+    try:
+        text = asyncio.new_event_loop().run_until_complete(_seed_then_fetch())
+        assert "AUDCAD_otc" in text
+        assert "OID-OPEN-XYZ" in text
+    finally:
+        asyncio.new_event_loop().run_until_complete(_cleanup())
+
+
+def test_balance_command_reports_mode_and_amount() -> None:
+    """``/balance`` reads the live broker manager from the state
+    stash and reports account mode + balance."""
+    from autotrader.services import admin_bot_state  # noqa: PLC0415
+
+    bot, fake = _make_bound_bot()
+
+    class _QM:
+        connected = True
+
+        def status(self) -> Any:  # noqa: ANN401
+            class _S:
+                account_mode = "PRACTICE"
+            return _S()
+
+        async def get_balance(self, timeout: int = 8) -> float:  # noqa: ASYNC109
+            return 1500.0
+
+    async def _run() -> str:
+        admin_bot_state.attach(pipeline=None, quotex=_QM(), admin_bot=bot)
+        await bot.start()
+        await fake.fire_message(555, "/balance")
+        return fake.sent_messages[-1][1]
+
+    try:
+        text = asyncio.new_event_loop().run_until_complete(_run())
+        assert "PRACTICE" in text
+        assert "1,500.00" in text
+    finally:
+        admin_bot_state.attach(pipeline=None, quotex=None, admin_bot=None)
+
+
+def test_balance_command_handles_disconnected_broker() -> None:
+    """When the broker isn't connected, ``/balance`` says so (and
+    never calls ``get_balance``) instead of raising."""
+    from autotrader.services import admin_bot_state  # noqa: PLC0415
+
+    bot, fake = _make_bound_bot()
+
+    class _QM:
+        connected = False
+
+        def status(self) -> Any:  # noqa: ANN401
+            class _S:
+                account_mode = "REAL"
+            return _S()
+
+        async def get_balance(self, timeout: int = 8) -> float:  # noqa: ASYNC109
+            raise AssertionError("get_balance must not be called when disconnected")
+
+    async def _run() -> str:
+        admin_bot_state.attach(pipeline=None, quotex=_QM(), admin_bot=bot)
+        await bot.start()
+        await fake.fire_message(555, "/balance")
+        return fake.sent_messages[-1][1]
+
+    try:
+        text = asyncio.new_event_loop().run_until_complete(_run())
+        assert "not connected" in text.lower()
+        assert "REAL" in text
+    finally:
+        admin_bot_state.attach(pipeline=None, quotex=None, admin_bot=None)
+
+
+def test_help_lists_today_and_open() -> None:
+    bot, fake = _make_bound_bot()
+
+    async def _run() -> str:
+        await bot.start()
+        await fake.fire_message(555, "/help")
+        return fake.sent_messages[-1][1]
+
+    text = asyncio.new_event_loop().run_until_complete(_run())
+    assert "/today" in text
+    assert "/open" in text

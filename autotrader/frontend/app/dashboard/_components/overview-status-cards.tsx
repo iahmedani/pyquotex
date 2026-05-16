@@ -30,7 +30,12 @@ export function OverviewStatusCards() {
   const balance = useQuery<BrokerBalance>({
     queryKey: ["broker", "balance"],
     queryFn: broker.balance,
-    refetchInterval: 30_000,
+    // Match the Broker page's 10s cadence. Same query key = one shared
+    // cache entry; a divergent interval here just meant the displayed
+    // balance silently lagged by up to 30s depending on which page was
+    // mounted. Also refetch when the operator returns to the tab.
+    refetchInterval: 10_000,
+    refetchOnWindowFocus: true,
     enabled: b.data?.connected ?? false,
   });
   const t = useQuery<TelegramStatus>({

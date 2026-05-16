@@ -169,6 +169,11 @@ def _attempt_to_payload(
         "placed_at": attempt.placed_at.isoformat() if attempt.placed_at else None,
         "settled_at": attempt.settled_at.isoformat() if attempt.settled_at else None,
     }
+    if cfg is not None:
+        # Parser name is independent of the ladder snapshot — surface it
+        # whenever the config is in hand so admin-bot notifications can
+        # name the source parser without a re-fetch.
+        payload["parser_name"] = getattr(cfg, "name", None)
     if state is not None and cfg is not None:
         # Compute the next-stake hint the same way risk_gate would on
         # the next signal: streak first, martingale second, base last.
@@ -276,7 +281,7 @@ class TradeExecutor:
         # Initial-insert publish. The bot notifier ignores this one
         # (it gates PLACED on ``placed_at is not None``); the dashboard
         # picks it up so the operator sees the row appear immediately.
-        self._publish(attempt, parser_config=parser_config, decision=decision)
+        self._publish(attempt, parser_config=parser_config)
 
         if not decision.allowed:
             log.info(
@@ -489,6 +494,7 @@ class TradeExecutor:
         *,
         state: object | None = None,
         cfg: object | None = None,
+        parser_config: object | None = None,
     ) -> None:
         """Fire-and-forget broadcast of a trade row to dashboard subscribers.
 
@@ -497,17 +503,25 @@ class TradeExecutor:
         Datetimes are ISO-8601 strings (the wire format the REST
         endpoint already uses).
 
-        ``parser_config`` and ``decision`` are optional — when they're
-        in scope (the ``submit`` → ``_place`` path), they layer on the
-        parser name and martingale ladder context the admin Telegram
-        bot uses for richer PLACED messages. Settlement-time and
-        reconcile-time publishes don't have them in scope and just emit
-        the base payload, which is fine: the formatter degrades cleanly.
+        Two optional context forms, both degrade cleanly when absent:
+
+        * ``parser_config`` — the place-time form (``submit`` →
+          ``_place`` path). No ``MartingaleState`` exists yet, so it
+          only surfaces the parser *name* (admin-bot PLACED messages).
+        * ``state`` + ``cfg`` — the settlement-time form: a
+          ``MartingaleState`` is in hand, so the full streak / ladder
+          snapshot is embedded too.
+
+        ``parser_config`` is folded into ``cfg`` for the payload — both
+        are a ``ParserConfig``; the only difference is whether a
+        ``state`` rode alongside.
         """
         if self._event_bus is None:
             return
+        effective_cfg = cfg if cfg is not None else parser_config
         self._event_bus.publish(
-            "trade.upserted", _attempt_to_payload(attempt, state=state, cfg=cfg),
+            "trade.upserted",
+            _attempt_to_payload(attempt, state=state, cfg=effective_cfg),
         )
 
     # ------------------------------------------------------------------
@@ -696,7 +710,7 @@ class TradeExecutor:
         # what the bot notifier uses to dedupe PLACED messages — only
         # this publish (not the initial-insert one) fires a Telegram
         # notification.
-        self._publish(attempt, parser_config=parser_config, decision=decision)
+        self._publish(attempt, parser_config=parser_config)
 
         if ok and order_id:
             # Fire-and-forget result watcher. Live trades use the
