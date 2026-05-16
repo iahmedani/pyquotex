@@ -115,7 +115,16 @@ class FakePyrogramBot:
         # AdminBot wraps callbacks in MessageHandler / CallbackQueryHandler.
         # We sniff the wrapper class name to avoid importing pyrogram.
         kind = type(handler).__name__
-        callback = getattr(handler, "callback", None)
+        # Pyrofork >=2.3 wraps the user callback: ``Handler.callback`` is
+        # now an internal listener-resolving shim
+        # (``MessageHandler.resolve_future_or_callback``) and the raw
+        # ``(client, message)`` coroutine moved to ``original_callback``.
+        # Driving the shim would require modelling pyrofork's whole
+        # listener API; we only want the hook. Prefer ``original_callback``
+        # and fall back to ``callback`` for older pyrofork.
+        callback = getattr(handler, "original_callback", None) or getattr(
+            handler, "callback", None,
+        )
         if callback is None:
             return
         if kind == "MessageHandler":

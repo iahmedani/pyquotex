@@ -391,11 +391,31 @@ All commands registered in the `COMMANDS` dict in `admin_bot_commands.py`:
 | `/caps loss\|stake\|concurrent <value>` | Set daily-loss / stake / concurrency caps |
 | `/stake <amount>` | Set default stake |
 | `/mode demo\|real` | Switch broker account mode (real requires inline confirm) |
+| `/balance` | Live broker balance + account mode (best-effort; degrades gracefully when disconnected/flaky) |
+| `/today` | Daily (UTC) P&L, committed stake, open count, win/loss + win rate, active caps — numbers shared with the risk gate via `compute_budget` |
+| `/open` | Currently-pending trades with broker order id |
 | `/trades [N]` | Last N trades (default 10) |
 | `/decisions [N]` | Last N parser decisions |
 | `/streaks` | Martingale streaks per parser |
 | `/channels` | List watched channels |
 | `/parsers [chat_id]` | List parsers |
+
+### G.2.1 Trade notifications (admin-bot DMs)
+
+`placed` / `settled` DMs (gated by `/notify placed|settled on|off`) now
+carry extra context, all best-effort and defensive — a missing field
+is omitted, never an error:
+
+- **Balance on every trade.** Each placed/settled DM appends a
+  `💰 balance $X` line. Fetched via a best-effort provider wired in
+  `main.py` (guards on `manager.connected`, 4 s timeout, swallows all
+  errors → line omitted). It is pure visibility: a balance fetch can
+  never delay, drop, or break a trade or its notification.
+- **Placed** also shows `parser` / `mode` / broker `order` id when known.
+- **Settled** also shows the source `parser` when known.
+
+If the balance line is missing on a DM, the broker was disconnected or
+slow at notify time — the trade itself is unaffected. Check `/balance`.
 
 ### G.3 Key structured-log events
 

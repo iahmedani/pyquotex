@@ -291,7 +291,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:  # noqa: PLR0912, PLR09
         from autotrader.services.admin_bot_notify import (  # noqa: PLC0415
             AdminBotNotifier,
         )
-        notifier = AdminBotNotifier(bot=admin_bot)
+
+        async def _balance_provider() -> float | None:
+            """Best-effort current balance for trade notifications.
+
+            Guards on ``connected`` first so a disconnected broker
+            doesn't emit a ``broker.balance.failed`` /
+            ``system.error`` storm on every queued trade. Any failure
+            collapses to ``None`` — the notification still sends,
+            just without the balance garnish.
+            """
+            try:
+                if not manager.connected:
+                    return None
+                return await manager.get_balance(timeout=4)
+            except Exception:  # noqa: BLE001  (visibility-only; never raise)
+                return None
+
+        notifier = AdminBotNotifier(
+            bot=admin_bot, balance_provider=_balance_provider,
+        )
         notifier_task = asyncio.create_task(notifier.run(event_bus))
 
     # Re-attach the resolver to include the notifier (the earlier

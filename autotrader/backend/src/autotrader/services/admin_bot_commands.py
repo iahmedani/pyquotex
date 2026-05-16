@@ -98,7 +98,9 @@ _HELP_TEXT = (
     "\n"
     "*Read*\n"
     "  /status — pipeline / kill switch / broker / Telegram pulse\n"
-    "  /balance — demo + real balances\n"
+    "  /balance — live broker balance + account mode\n"
+    "  /today — daily P&L, committed stake, win rate, caps\n"
+    "  /open — currently-pending trades\n"
     "  /trades [N] — last N trades (default 10)\n"
     "  /decisions [N] — last N parser decisions\n"
     "  /streaks — martingale streaks per parser\n"
@@ -166,13 +168,125 @@ async def handle_status(_message: Any, _bot: Any) -> Reply:
 
 
 async def handle_balance(_message: Any, _bot: Any) -> Reply:
-    return Reply(
-        text=(
-            "*Balance*\n"
-            "Live balances are on the dashboard (/balance is wired in "
-            "v2 once QuotexManager exposes a cached snapshot)."
-        ),
+    """Live broker balance + account mode (best-effort).
+
+    Reads the broker manager from the admin-bot state stash rather
+    than the dashboard. Every failure mode degrades to a readable
+    message — never an exception — because the operator pings this
+    exactly when the broker is flaky.
+    """
+    from autotrader.services.admin_bot_state import get_quotex  # noqa: PLC0415
+
+    qx = get_quotex()
+    if qx is None:
+        return Reply(text="*Balance*\nBroker manager not attached.")
+
+    mode = "?"
+    try:
+        mode = qx.status().account_mode
+    except Exception:  # noqa: BLE001  (status is best-effort context)
+        pass
+
+    if not getattr(qx, "connected", False):
+        return Reply(
+            text=(
+                f"*Balance*\nMode: {mode}\n"
+                "Broker not connected — use /reconnect, then retry."
+            ),
+        )
+    try:
+        bal = await qx.get_balance(timeout=8)
+    except Exception as exc:  # noqa: BLE001  (broker surfaces vary)
+        return Reply(
+            text=(
+                f"*Balance*\nMode: {mode}\n"
+                f"Unavailable ({type(exc).__name__}) — broker may be "
+                "reconnecting. Retry shortly."
+            ),
+        )
+    return Reply(text=f"*Balance*\nMode: {mode}\nBalance: ${bal:,.2f}")
+
+
+# --------------------------------------------------------------------------
+# /today — daily P&L + risk-budget snapshot
+# --------------------------------------------------------------------------
+
+
+async def handle_today(_message: Any, _bot: Any) -> Reply:
+    """One-screen 'how's today going' summary (UTC day).
+
+    Reuses :func:`risk_gate.compute_budget` for the exact numbers the
+    risk gate itself sees (realised P&L, committed stake, open
+    attempts) so the operator's view can't drift from the gate's,
+    then adds a win/loss tally + the active caps for context.
+    """
+    from datetime import UTC, datetime, time  # noqa: PLC0415
+
+    from sqlalchemy import func  # noqa: PLC0415
+    from sqlmodel import select  # noqa: PLC0415
+
+    from autotrader.models.trade_attempt import TradeAttempt  # noqa: PLC0415
+    from autotrader.services.risk_gate import compute_budget  # noqa: PLC0415
+
+    today_start = datetime.combine(
+        datetime.now(UTC).date(), time(0, 0), tzinfo=UTC,
     )
+    async with AsyncSessionLocal() as session:
+        budget = await compute_budget(session)
+        gs = await session.get(GlobalSettings, 1) or GlobalSettings(id=1)
+
+        async def _count(status: str) -> int:
+            stmt = (
+                select(func.count())
+                .select_from(TradeAttempt)
+                .where(TradeAttempt.created_at >= today_start)
+                .where(TradeAttempt.status == status)
+            )
+            return int((await session.exec(stmt)).one() or 0)
+
+        won = await _count("won")
+        lost = await _count("lost")
+
+    decided = won + lost
+    win_rate = f"{(won / decided * 100):.0f}%" if decided else "—"
+
+    text = (
+        "*Today* (UTC)\n"
+        f"P&L: ${budget.realised_pnl:+,.2f}\n"
+        f"Committed: ${budget.committed_stake:,.2f}\n"
+        f"Open: {budget.open_attempts}\n"
+        f"Win/Loss: {won} / {lost}  (win {win_rate})\n"
+        f"Caps: loss ${gs.daily_max_loss:.0f} · "
+        f"stake ${gs.daily_max_stake:.0f} · "
+        f"max {gs.max_concurrent_trades}"
+    )
+    return Reply(text=text)
+
+
+# --------------------------------------------------------------------------
+# /open — currently-pending trades
+# --------------------------------------------------------------------------
+
+
+async def handle_open(_message: Any, _bot: Any) -> Reply:
+    """Every trade still in ``pending`` — what's live on the broker
+    right now, with the broker order id for cross-referencing."""
+    from autotrader.models.trade_attempt import list_pending  # noqa: PLC0415
+
+    async with AsyncSessionLocal() as session:
+        rows = await list_pending(session)
+
+    if not rows:
+        return Reply(text="No open trades.")
+
+    lines = ["*Open trades*"]
+    for r in rows:
+        oid = r.broker_order_id or "—"
+        lines.append(
+            f"? {r.asset} {r.direction.upper()} {r.duration_seconds}s "
+            f"${r.stake:.2f} · {r.trade_mode} · {oid}"
+        )
+    return Reply(text="\n".join(lines))
 
 
 # --------------------------------------------------------------------------
@@ -720,6 +834,8 @@ COMMANDS: dict[str, Handler] = {
     "/whoami": handle_whoami,
     "/status": handle_status,
     "/balance": handle_balance,
+    "/today": handle_today,
+    "/open": handle_open,
     "/trades": handle_trades,
     "/decisions": handle_decisions,
     "/streaks": handle_streaks,

@@ -39,6 +39,10 @@ export default function BrokerPage() {
     queryFn: broker.balance,
     enabled: status.data?.connected ?? false,
     refetchInterval: 10_000,
+    // Operators leave this tab in the background for long stretches;
+    // refetch the moment they come back rather than showing a value
+    // that's up to 10s stale (overrides the global focus-off default).
+    refetchOnWindowFocus: true,
   });
 
   const refresh = () => qc.invalidateQueries({ queryKey: ["broker"] });
@@ -62,7 +66,16 @@ export default function BrokerPage() {
         <BalanceCard
           balance={balance.data?.balance}
           loading={balance.isLoading}
-          enabled={status.data?.connected ?? false}
+          isError={balance.isError}
+          errorMessage={
+            balance.error instanceof ApiError
+              ? balance.error.message
+              : balance.error
+                ? String(balance.error)
+                : null
+          }
+          updatedAt={balance.data !== undefined ? balance.dataUpdatedAt : null}
+          connected={status.data?.connected ?? false}
         />
       </div>
 
@@ -258,34 +271,86 @@ function StateBadge({ state }: { state: BrokerStatus["state"] }) {
 function BalanceCard({
   balance,
   loading,
-  enabled,
+  isError,
+  errorMessage,
+  updatedAt,
+  connected,
 }: {
   balance?: number;
   loading: boolean;
-  enabled: boolean;
+  isError: boolean;
+  errorMessage: string | null;
+  updatedAt: number | null;
+  connected: boolean;
 }) {
+  // Re-render every 5s so the "updated …s ago" label keeps counting
+  // even when no new data arrives — e.g. polling is paused because the
+  // broker disconnected and the query went `enabled: false`.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setTick((n) => n + 1), 5_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const hasValue = balance !== undefined;
+  const ago = updatedAt ? describeAge(updatedAt) : null;
+
   return (
     <Card>
       <CardHeader>
         <CardTitle>Balance</CardTitle>
-        <CardDescription>Refreshes every 10s while connected.</CardDescription>
+        <CardDescription>
+          Refreshes every 10s while connected, and when you return to the
+          tab.
+        </CardDescription>
       </CardHeader>
-      <CardContent>
-        {!enabled && (
+      <CardContent className="space-y-2">
+        {!connected && !hasValue && (
           <p className="text-sm text-muted-foreground">
             Connect the broker to see balance.
           </p>
         )}
-        {enabled && loading && (
+
+        {connected && loading && !hasValue && (
           <p className="text-sm text-muted-foreground">Loading…</p>
         )}
-        {enabled && balance !== undefined && (
-          <p className="font-mono text-3xl font-semibold tracking-tight">
-            {balance.toLocaleString(undefined, {
-              minimumFractionDigits: 2,
-              maximumFractionDigits: 2,
-            })}
+
+        {connected && isError && !hasValue && (
+          <p className="text-sm text-destructive">
+            Couldn&rsquo;t load balance
+            {errorMessage ? `: ${errorMessage}` : "."}
           </p>
+        )}
+
+        {hasValue && (
+          <>
+            <p
+              className={
+                "font-mono text-3xl font-semibold tracking-tight " +
+                (connected ? "" : "text-muted-foreground")
+              }
+            >
+              {balance.toLocaleString(undefined, {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })}
+            </p>
+            {!connected && (
+              <p className="text-xs text-amber-400">
+                Disconnected — last known balance
+                {ago ? ` (updated ${ago})` : ""}.
+              </p>
+            )}
+            {connected && isError && (
+              <p className="text-xs text-amber-400">
+                Showing last good value — refresh failed
+                {ago ? ` (updated ${ago})` : ""}.
+              </p>
+            )}
+            {connected && !isError && ago && (
+              <p className="text-xs text-muted-foreground">Updated {ago}.</p>
+            )}
+          </>
         )}
       </CardContent>
     </Card>
@@ -587,6 +652,14 @@ function ActionsCard({
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function describeAge(epochMs: number): string {
+  const sec = Math.max(0, Math.floor((Date.now() - epochMs) / 1000));
+  if (sec < 60) return `${sec}s ago`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+  return `${Math.floor(sec / 86400)}d ago`;
+}
 
 function Row({
   label,

@@ -14,8 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
+
+# A best-effort async balance source. Returns the current broker
+# balance, or ``None`` when it can't be fetched (disconnected,
+# timeout, error). Never raises — the wiring in ``main.py`` swallows.
+BalanceProvider = Callable[[], Awaitable[float | None]]
 
 import structlog
 
@@ -69,15 +75,22 @@ class AdminBotNotifier:
     # path lives in the message hook (Task 15 wires it).
     _FAILURE_THRESHOLD = 5
 
+    # Hard ceiling on a single best-effort balance fetch. A trade
+    # notification must never wait on the broker — if the balance
+    # isn't back in time we send the message without it.
+    _BALANCE_TIMEOUT = 5.0
+
     def __init__(
         self,
         *,
         bot: Any,
+        balance_provider: BalanceProvider | None = None,
         bucket_capacity: int = 5,
         refill_seconds: float = 30.0,
         digest_window: float = 60.0,
     ) -> None:
         self._bot = bot
+        self._balance_provider = balance_provider
         self._capacity = bucket_capacity
         self._refill = 1.0 / refill_seconds  # tokens per second
         self._digest_window = digest_window
@@ -186,6 +199,23 @@ class AdminBotNotifier:
     # Internals
     # ------------------------------------------------------------------
 
+    async def _safe_balance(self) -> float | None:
+        """Best-effort current balance for a trade notification.
+
+        Never raises and never blocks longer than ``_BALANCE_TIMEOUT``.
+        A balance fetch is pure visibility garnish — losing it must
+        not delay, drop, or break the trade message it rides on, so
+        every failure mode collapses to ``None``.
+        """
+        if self._balance_provider is None:
+            return None
+        try:
+            return await asyncio.wait_for(
+                self._balance_provider(), timeout=self._BALANCE_TIMEOUT,
+            )
+        except Exception:  # noqa: BLE001  (visibility-only; swallow all)
+            return None
+
     async def _send(
         self,
         chat_id: int,
@@ -215,19 +245,68 @@ class AdminBotNotifier:
 # --------------------------------------------------------------------------
 
 
-def format_trade_placed(payload: dict[str, Any]) -> str:
+def _money(value: Any) -> str:
+    """Render a numeric amount with thousands separators + 2dp.
+    Non-numeric (or missing) values pass through as ``str`` so the
+    formatter stays defensive against a hand-built payload."""
+    if isinstance(value, (int, float)):
+        return f"{float(value):,.2f}"
+    return str(value)
+
+
+def _balance_line(balance: float | None) -> str:
+    """One-line current-balance garnish, or empty when unavailable."""
+    if balance is None:
+        return ""
+    return f"💰 balance ${_money(balance)}"
+
+
+def _meta_line(payload: dict[str, Any], *, include_mode: bool) -> str:
+    """Compact 'parser · mode' context line. Each piece is optional —
+    omitted entirely when the payload doesn't carry it (the placed
+    event before a config is threaded, a hand-built test payload)."""
+    bits: list[str] = []
+    parser = payload.get("parser_name")
+    if parser:
+        bits.append(f"parser {parser}")
+    if include_mode:
+        mode = payload.get("trade_mode")
+        if mode:
+            bits.append(f"mode {mode}")
+    return " · ".join(bits)
+
+
+def format_trade_placed(
+    payload: dict[str, Any],
+    *,
+    balance: float | None = None,
+) -> str:
     asset = payload.get("asset") or "?"
     direction = (payload.get("direction") or "?").upper()
     duration = payload.get("duration_seconds", 0)
     stake = payload.get("stake", 0)
-    head = f"🎯 {direction} {asset} {duration}s · ${stake}"
+    head = f"🎯 {direction} {asset} {duration}s · ${_money(stake)}"
+    lines = [head]
+    meta = _meta_line(payload, include_mode=True)
+    if meta:
+        lines.append(f"   {meta}")
+    order_id = payload.get("broker_order_id")
+    if order_id:
+        lines.append(f"   order {order_id}")
+    balance_line = _balance_line(balance)
+    if balance_line:
+        lines.append(f"   {balance_line}")
     ladder_line = _ladder_line(payload)
     if ladder_line:
-        return f"{head}\n   {ladder_line}"
-    return head
+        lines.append(f"   {ladder_line}")
+    return "\n".join(lines)
 
 
-def format_trade_settled(payload: dict[str, Any]) -> str:
+def format_trade_settled(
+    payload: dict[str, Any],
+    *,
+    balance: float | None = None,
+) -> str:
     """Format a settled-trade notification, optionally appending
     a ladder progress line when one of the parsers' ladders is
     active.
@@ -245,16 +324,23 @@ def format_trade_settled(payload: dict[str, Any]) -> str:
     profit = float(profit_raw) if isinstance(profit_raw, (int, float)) else 0.0
 
     if status == "won":
-        head = f"✅ WON +${profit:.2f} {asset} {direction} ${stake}"
+        head = f"✅ WON +${profit:.2f} {asset} {direction} ${_money(stake)}"
     elif status == "lost":
-        head = f"❌ LOST ${profit:.2f} {asset} {direction} ${stake}"
+        head = f"❌ LOST ${profit:.2f} {asset} {direction} ${_money(stake)}"
     else:
-        head = f"⚠️ {status.upper()} {asset} {direction} ${stake}"
+        head = f"⚠️ {status.upper()} {asset} {direction} ${_money(stake)}"
 
+    lines = [head]
+    meta = _meta_line(payload, include_mode=False)
+    if meta:
+        lines.append(f"   {meta}")
+    balance_line = _balance_line(balance)
+    if balance_line:
+        lines.append(f"   {balance_line}")
     ladder_line = _ladder_line(payload)
     if ladder_line:
-        return f"{head}\n   {ladder_line}"
-    return head
+        lines.append(f"   {ladder_line}")
+    return "\n".join(lines)
 
 
 def _ladder_line(payload: dict[str, Any]) -> str:
@@ -324,9 +410,17 @@ async def _consume(self: "AdminBotNotifier", bus: Any) -> None:
                     # publish always carries a non-None placed_at, so
                     # gate on that to dedupe.
                     if status == "pending" and placed_at is not None:
-                        await self.notify("placed", format_trade_placed(event.payload))
+                        balance = await self._safe_balance()
+                        await self.notify(
+                            "placed",
+                            format_trade_placed(event.payload, balance=balance),
+                        )
                     elif status in ("won", "lost", "refund"):
-                        await self.notify("settled", format_trade_settled(event.payload))
+                        balance = await self._safe_balance()
+                        await self.notify(
+                            "settled",
+                            format_trade_settled(event.payload, balance=balance),
+                        )
                 elif event.type == "risk.rejected":
                     await self.notify("risk_rejected", format_risk_rejected(event.payload))
                 elif event.type == "system.error":
