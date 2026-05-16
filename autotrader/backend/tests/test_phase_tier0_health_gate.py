@@ -149,12 +149,19 @@ async def test_assert_live_raises_ws_not_authed_when_auth_status_not_authenticat
 
 
 @pytest.mark.asyncio
-async def test_assert_live_raises_no_tick_seen_when_no_realtime_price_entry() -> None:
-    """assert_live raises BrokerNotLive(reason='no_tick_seen')
-    when asset has no entry in realtime_price."""
-    from pyquotex.global_value import AuthStatus  # noqa: PLC0415
+async def test_assert_live_allows_when_no_realtime_price_entry() -> None:
+    """A cold asset (no entry in realtime_price) must NOT block.
 
-    from autotrader.services.quotex_manager import BrokerNotLive  # noqa: PLC0415
+    Regression: pyquotex starts an asset's realtime stream INSIDE
+    buy()/open_pending() (start_realtime_price), which runs AFTER this
+    gate. So at gate time a freshly-targeted/scheduled asset always has
+    an empty deque — that is the NORMAL state, not a dead WS. Blocking
+    here killed legitimate scheduled OTC trades with
+    `healthgate:no_tick_seen` (observed 2026-05-16). connected+authed
+    already proved liveness; observe and allow.
+    """
+    from pyquotex.global_value import AuthStatus  # noqa: PLC0415
+    from structlog.testing import capture_logs  # noqa: PLC0415
 
     api = _FakeApi(
         auth_status=int(AuthStatus.AUTHENTICATED),
@@ -162,20 +169,20 @@ async def test_assert_live_raises_no_tick_seen_when_no_realtime_price_entry() ->
     )
     mgr = _make_manager("connected", api)
 
-    with pytest.raises(BrokerNotLive) as exc_info:
-        await mgr.assert_live("EURUSD_otc")  # type: ignore[attr-defined]
+    with capture_logs() as logs:
+        await mgr.assert_live("EURUSD_otc")  # type: ignore[attr-defined]  # MUST NOT raise
 
-    assert exc_info.value.reason == "no_tick_seen"
-    assert exc_info.value.detail.get("asset") == "EURUSD_otc"
+    observed = [r for r in logs if r["event"] == "broker.assert_live.no_tick_yet"]
+    assert observed, logs
+    assert observed[0]["asset"] == "EURUSD_otc"
 
 
 @pytest.mark.asyncio
-async def test_assert_live_raises_no_tick_seen_when_realtime_price_deque_is_empty() -> None:
-    """assert_live raises BrokerNotLive(reason='no_tick_seen')
-    when the deque for the asset is empty (present but no ticks)."""
+async def test_assert_live_allows_when_realtime_price_deque_is_empty() -> None:
+    """Same as above for the present-but-empty deque case (asset key
+    exists in realtime_price but no tick has landed yet)."""
     from pyquotex.global_value import AuthStatus  # noqa: PLC0415
-
-    from autotrader.services.quotex_manager import BrokerNotLive  # noqa: PLC0415
+    from structlog.testing import capture_logs  # noqa: PLC0415
 
     api = _FakeApi(
         auth_status=int(AuthStatus.AUTHENTICATED),
@@ -183,10 +190,12 @@ async def test_assert_live_raises_no_tick_seen_when_realtime_price_deque_is_empt
     )
     mgr = _make_manager("connected", api)
 
-    with pytest.raises(BrokerNotLive) as exc_info:
-        await mgr.assert_live("EURUSD_otc")  # type: ignore[attr-defined]
+    with capture_logs() as logs:
+        await mgr.assert_live("EURUSD_otc")  # type: ignore[attr-defined]  # MUST NOT raise
 
-    assert exc_info.value.reason == "no_tick_seen"
+    assert any(
+        r["event"] == "broker.assert_live.no_tick_yet" for r in logs
+    ), logs
 
 
 @pytest.mark.asyncio

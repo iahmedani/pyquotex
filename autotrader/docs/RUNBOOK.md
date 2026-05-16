@@ -322,14 +322,23 @@ Trigger: `executor.healthgate_blocked reason=stale_feed` in logs
 docker logs autotrader-api 2>&1 | grep executor.healthgate_blocked | tail -5 | jq .
 ```
 
-Possible `reason` values (emitted by health-gate checks in `quotex_manager.py`):
+Blocking `reason` values (emitted by health-gate checks in `quotex_manager.py`):
 
 | reason | Meaning |
 |---|---|
 | `not_connected` | Manager state machine is not in `"connected"` state |
 | `ws_not_authed` | State is `"connected"` but pyquotex's WS auth flag is not set |
-| `no_tick_seen` | No realtime-price tick for this asset has arrived since connect |
-| `stale_feed` | A tick arrived but it is older than `AUTOTRADER_BROKER_STALE_FEED_MAX_AGE_SECONDS` |
+| `stale_feed` | A tick history exists for the asset but the latest tick is older than `AUTOTRADER_BROKER_STALE_FEED_MAX_AGE_SECONDS` (a warm feed that froze) |
+
+> **Note (2026-05-16 hotfix):** a not-yet-streamed asset is **not** a
+> blocking reason. pyquotex subscribes an asset's realtime feed *inside*
+> `buy()`/`open_pending()`, which runs *after* the gate, so a freshly
+> targeted/scheduled asset legitimately has no tick at gate time. The
+> gate logs `broker.assert_live.no_tick_yet` (INFO) and **allows** the
+> trade; pyquotex's own "Timeout waiting for realtime price data" path
+> handles a genuinely dead feed once subscribed. The earlier
+> `no_tick_seen` *block* was a false-positive that killed real
+> scheduled OTC trades and has been removed.
 
 For `stale_feed` specifically:
 - Wait 10–30 s and re-check — a brief WS hiccup is self-healing.
@@ -408,7 +417,8 @@ All commands registered in the `COMMANDS` dict in `admin_bot_commands.py`:
 | `broker.connect.ok` | INFO | `quotex_manager.py` | Broker connected successfully |
 | `broker.connect.rejection_probe` | WARNING | `quotex_manager.py` | Connect failed — forensic probe fields attached |
 | `broker.reconnect_ceiling_reached` | ERROR | `quotex_manager.py` | Hard ceiling hit — supervisor stopped, manual `/reconnect` required |
-| `executor.healthgate_blocked` | WARNING | `executor.py` | Trade blocked by WS health gate; `reason` field is one of `not_connected` / `ws_not_authed` / `no_tick_seen` / `stale_feed` |
+| `executor.healthgate_blocked` | WARNING | `executor.py` | Trade blocked by WS health gate; `reason` field is one of `not_connected` / `ws_not_authed` / `stale_feed` |
+| `broker.assert_live.no_tick_yet` | INFO | `quotex_manager.py` | Asset had no realtime tick at gate time — observed, trade ALLOWED (pyquotex subscribes the feed inside the buy that follows). Not a block. |
 | `executor.draining` | INFO | `executor.py` | Executor entered drain mode (shutdown in progress) |
 | `lifespan.drain.complete` | INFO | `executor.py` | All in-flight trades drained before shutdown |
 | `lifespan.drain.timeout` | WARNING | `executor.py` | Drain timed out; `remaining` shows how many trades were abandoned |
